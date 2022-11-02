@@ -1,0 +1,10 @@
+**/target
+
+.bloop
+.bsp
+.history
+.metals
+.vscode
+.idea
+
+TypeclassDerivation
