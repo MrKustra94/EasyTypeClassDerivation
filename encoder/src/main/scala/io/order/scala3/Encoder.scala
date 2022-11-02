@@ -45,9 +45,7 @@ private[scala3] trait EasyWay:
         val childrenEncoders = deriveEncoders[s.MirroredElemTypes]
         encoderSum(s, childrenEncoders)
       case p: Mirror.ProductOf[T] => 
-        val fieldsEncoders = summonEncoders[p.MirroredElemTypes]
-        val fieldsNames = constValueTuple[p.MirroredElemLabels].toList.asInstanceOf[List[String]]
-        encoderProduct(p, fieldsEncoders, fieldsNames)
+        encoderProduct(p)
     
   inline final def deriveEncoders[T <: Tuple]: IndexedSeq[Encoder[_]] = 
     inline erasedValue[T] match
@@ -70,18 +68,16 @@ private[scala3] trait EasyWay:
        case _: EmptyTuple => Nil
        case _: (t *: ts) => summonInline[Encoder[t]] :: summonEncoders[ts]
 
-  inline final def encoderProduct[T](
-    s: Mirror.ProductOf[T], 
-    fieldsEncoders: List[Encoder[_]],
-    fieldsNames: List[String]
-  ): Encoder[T] = 
+  inline final def encoderProduct[T](s: Mirror.ProductOf[T]): Encoder[T] = 
     new Encoder[T]:
-      private val encoders = fieldsEncoders
-      private val fields = fieldsNames
-
       def encode(t: T): Json =   
-        val zippedProps = t.asInstanceOf[scala.Product].productIterator.zip(fields).zip(encoders)
-        val jsonFields = zippedProps.map { case ((value, name), encoder) =>
-            name -> encoder.asInstanceOf[Encoder[Any]].encode(value)
-        }
-        Json.JsonObject(jsonFields.toMap)
+        Json.JsonObject(go[s.MirroredElemTypes, s.MirroredElemLabels](t.asInstanceOf[Product], Map.empty)(0))
+
+  inline def go[T <: Tuple, L <: Tuple](instance: Product, acc: Map[String, Json])(index: Int): Map[String, Json] =
+    inline erasedValue[(T, L)] match
+      case (_: (t *: ts), _: (l *: ls)) => 
+        val label = constValue[l].toString
+        val encoder = summonInline[Encoder[t]]
+        val newAcc = acc + (label -> encoder.encode(instance.productElement(index).asInstanceOf[t]))
+        go[ts, ls](instance, newAcc)(index + 1)
+      case (_, _) => acc
