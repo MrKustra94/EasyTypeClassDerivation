@@ -36,16 +36,16 @@ object Encoder extends EasyWay:
   given optionEncoder[A](using A: Encoder[A]): Encoder[Option[A]] with
     def encode(oa: Option[A]): Json = oa.fold(Json.JsonNull)(_.asJson())
 
-  inline def derived[T](using m: Mirror.Of[T]): Encoder[T] = derivedEasy[T]
+  inline def derived[T](using m: Mirror.Of[T]): Encoder[T] = derivedEasy
 
 private[scala3] trait EasyWay:
   inline def derivedEasy[T](using m: Mirror.Of[T]): Encoder[T] = 
     inline m match
+      case p: Mirror.ProductOf[T] => 
+        encoderProduct(p)  
       case s: Mirror.SumOf[T] => 
         val childrenEncoders = deriveEncoders[s.MirroredElemTypes]
         encoderSum(s, childrenEncoders)
-      case p: Mirror.ProductOf[T] => 
-        encoderProduct(p)
     
   inline final def deriveEncoders[T <: Tuple]: IndexedSeq[Encoder[_]] = 
     inline erasedValue[T] match
