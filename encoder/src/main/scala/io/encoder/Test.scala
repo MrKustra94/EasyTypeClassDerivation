@@ -4,6 +4,8 @@ import io.encoder.scala3.*
 
 import scala.deriving.*
 import scala.quoted.Expr
+import scala.collection.mutable.ListBuffer
+import io.encoder.Ids.ClientId
 
 object Ids:
   opaque type ClientId = String
@@ -19,17 +21,29 @@ enum OrderEvent:
   case OrderRejected(clientId: Ids.ClientId, canBeResumed: Boolean)
 
 object OrderEvent:
-  given Encoder[OrderEvent] = Encoder.derived[OrderEvent]
+  //Hand written naive:
+  //Mean: 208
+  //99p: 417
+
+  // Hand written optimized (with PM):
+  // Mean: 83
+  // 99p: 250
+  given Encoder[OrderEvent] with
+    def encode(oe: OrderEvent): Json = 
+      oe match
+        case ord: OrderPlaced =>
+          val fields = Map.empty[String, Json]
+          Json.JsonObject(
+            fields + 
+              (("type", Encoder[String].encode("OrderPlaced"))) +
+              (("clientId", Encoder[ClientId].encode(ord.clientId))) +
+              (("orderitemsCound", Encoder[Int].encode(ord.orderItemsCount))) +
+              (("prepaid", Encoder[Boolean].encode(ord.prepaid)))
+          )
+        case _ => Json.JsonBoolean(false)    
 
 object Test:
   @main def run =
-    val or: OrderEvent = OrderEvent.OrderPlaced(Ids.ClientId.make("Customer"), 1000, true)
-    var json: Json = null
-    while (true) {
-      val start = System.nanoTime()
-      json = or.asJson()
-      val end = System.nanoTime()
-      println(s"Took: ${end - start} ns.")
-    }
-    println(json.prettyString())
+    val oe: OrderEvent = OrderEvent.OrderPlaced(Ids.ClientId.make("Customer"), 1000, true)
+    println(oe.asJson().prettyString())
       

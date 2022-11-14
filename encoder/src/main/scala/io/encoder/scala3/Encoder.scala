@@ -26,7 +26,7 @@ enum Json:
         case Json.JsonObject(value) => value.map(e => s"\"${e._1}\": ${e._2.prettyString()}").mkString("{\n  ", ",\n  ", "\n}")
 
 // Type class definition
-trait Encoder[A]:
+trait Encoder[@specialized(Int, Boolean) A]:
   def encode(a: A): Json
   
   // Extension block defines additional, convenient methods for callers to be used.
@@ -54,58 +54,195 @@ object Encoder:
   inline def derived[T](using m: Mirror.Of[T]): Encoder[T] = 
     inline m match
       case p: Mirror.ProductOf[T] => 
-        derivedP(p, false)
+        MacroBased.deriveProductEncoder[T](p)
       case s: Mirror.SumOf[T] => 
-        val derivedInstances = deriveEncoders[s.MirroredElemTypes]
-        new Encoder[T]:
-          def encode(t: T): Json = 
-            val to = s.ordinal(t)
-            derivedInstances(to).asInstanceOf[Encoder[T]].encode(t)
-
-  inline def derivedP[T](p: Mirror.ProductOf[T], withDiscriminator: Boolean): Encoder[T] =
-    new Encoder[T]:
-      def encode(t: T): Json =
-        val initialMap = 
-          inline if withDiscriminator then
-            val typeJsoned = summonInline[Encoder[String]].encode(constValue[p.MirroredLabel])
-            Map.empty[String, Json] + (("type", typeJsoned))
-          else Map.empty[String, Json]
-        go[p.MirroredElemLabels, p.MirroredElemTypes, T](initialMap, t)
-
-  inline def go[L <: Tuple, T <: Tuple, I](acc: Map[String, Json], instance: I): Json.JsonObject =
-    inline erasedValue[(L, T)] match
-      case _: (l *: ls, t *: ts) =>        
-        go[ls, ts, I](acc + makeJsonEntry[l, t, I](instance), instance)      
-      case _ => Json.JsonObject(acc)
-
-  inline def makeJsonEntry[L, T, I](instance: I): (String, Json) = 
-    ${ makeJsonEntryMacro[L, T, I]('instance) }
-
-  private def makeJsonEntryMacro[L: Type, T: Type, I](instance: Expr[I])(using Quotes): Expr[(String, Json)] = 
-    import quotes.reflect.*
-    val fieldName = Type.valueOfConstant[L].getOrElse(report.throwError("XD2")).asInstanceOf[String]
-    val encoder = Expr.summon[Encoder[T]].getOrElse(report.throwError("XD"))
-    '{
-      val fieldNameV = ${Expr(fieldName)}
-      val selected = ${Select.unique(instance.asTerm, fieldName).asExprOf[T]}
-      val json = $encoder.encode(selected)
-      (fieldNameV, json)
-    }
+        MacroBased.deriveSumEncoder[T](s)
 
 
-  inline def summonEncoders[T <: Tuple]: List[Encoder[_]] =
-    inline erasedValue[T] match
-      case _: EmptyTuple => Nil
-      case _: (t *: ts) => summonInline[Encoder[t]] :: summonEncoders[ts]   
+  trait Approach: 
+    inline def deriveProductEncoder[T](p: Mirror.ProductOf[T]): Encoder[T]
+    inline def deriveSumEncoder[T](s: Mirror.SumOf[T]): Encoder[T]
 
-  inline def deriveEncoders[T <: Tuple]: IndexedSeq[Encoder[_]] =
-    inline erasedValue[T] match
-      case _: EmptyTuple => Vector.empty
-      case _: (t *: ts) => summonOrDerive[t] +: deriveEncoders[ts]
+  /*
+  * ==================        
+  * Deriving Encoders- naive appraoch
+  * ==================
+  * Mean: ~290
+  * 99p: ~540
+  */
+  object ShallowMirror extends Approach:     
+    inline def deriveProductEncoder[T](p: Mirror.ProductOf[T]): Encoder[T] =
+      deriveProductEncoder[T](p, false)
 
-  // Must be defined separately    
-  inline def summonOrDerive[T] = 
-    summonFrom { 
-      case encoder: Encoder[T] => encoder
-      case p : Mirror.ProductOf[T] => derivedP(p, true)
-    }    
+    private inline def deriveProductEncoder[T](p: Mirror.ProductOf[T], inline withDiscriminator: Boolean): Encoder[T] = //Slow... ~250ns to transform to JSON.
+      val fieldEncoders = summonEncoders[p.MirroredElemTypes]
+      new Encoder[T]:
+        def encode(t: T): Json =
+          val tp = t.asInstanceOf[scala.Product]
+          val fields = tp.productElementNames
+              .zip(tp.productIterator)
+              .zip(fieldEncoders)
+              .map { case ((name, value), encoder) =>
+                name -> encoder.asInstanceOf[Encoder[Any]].encode(value)
+              }
+              .toMap
+          Json.JsonObject(
+            inline if withDiscriminator then 
+              fields + (("type", Encoder[String].encode(extractString[p.MirroredLabel])))
+            else fields
+          )
+
+    private inline def extractString[T]: String =
+      inline constValue[T] match
+        case str: String => str          
+
+    private inline def summonEncoders[FieldTypes <: Tuple]: List[Encoder[_]] =
+      inline erasedValue[FieldTypes] match
+        case _: EmptyTuple => Nil
+        case _: (t *: ts) => summonInline[Encoder[t]] :: summonEncoders[ts]                
+
+    inline def deriveSumEncoder[T](s: Mirror.SumOf[T]): Encoder[T] =
+      new Encoder[T] {
+        private val encoders = deriveSumCasesEncoders[s.MirroredElemTypes]  
+
+        def encode(t: T): Json =  
+          encoders.apply(s.ordinal(t)).asInstanceOf[Encoder[Any]].encode(t)
+      }
+
+    private inline def deriveSumCasesEncoders[CaseTypes <: Tuple]: IndexedSeq[Encoder[_]] =
+      inline erasedValue[CaseTypes] match
+        case _: EmptyTuple => IndexedSeq.empty
+        case _: (t *: ts)  => deriveSumProductEncoder[t] +: deriveSumCasesEncoders[ts] 
+
+    private inline def deriveSumProductEncoder[T]: Encoder[T] =
+      summonFrom { 
+        case p: Mirror.ProductOf[T] => deriveProductEncoder[T](p, true)
+      }
+
+  /*
+  * =========================================
+  * Deriving encoders - intermediate approach
+  * =========================================
+  * Mean: ~40
+  * 99p: ~250
+  */    
+  object ExhaustingMirror extends Approach:
+    inline def deriveProductEncoder[T](p: Mirror.ProductOf[T]): Encoder[T] = 
+      deriveProductEncoder(p, false)
+
+    private inline def deriveProductEncoder[T](p: Mirror.ProductOf[T], inline withDiscriminator: Boolean): Encoder[T] = 
+      new Encoder[T]:
+        def encode(t: T): Json = 
+          val acc = 
+            inline if withDiscriminator then 
+              Map.empty[String, Json] + (("type", Encoder[String].encode(extractString[p.MirroredLabel])))
+            else Map.empty[String, Json]
+          buildRecursively[p.MirroredElemLabels, p.MirroredElemTypes](
+            acc = acc,
+            index = 0,
+            instance = t.asInstanceOf[scala.Product]
+          ) 
+
+    private inline def extractString[T]: String = 
+      inline constValue[T] match
+        case str: String => str
+
+    private inline def buildRecursively[Labels <: Tuple, FieldTypes <: Tuple](acc: Map[String, Json], index: Int, instance: scala.Product): Json.JsonObject = // Much faster! Over 42 ns.
+      inline erasedValue[(Labels, FieldTypes)] match
+        case _: ((l *: ls), (t *: ts)) => 
+          val fieldName = extractString[l]
+          val fieldEncoder = summonInline[Encoder[t]]
+          val fieldValue = instance.productElement(index).asInstanceOf[t]
+          val pair = (fieldName, fieldEncoder.encode(fieldValue))
+          buildRecursively[ls, ts](acc + pair, index + 1, instance)
+        case _ => Json.JsonObject(acc)
+
+    inline def deriveSumEncoder[T](s: Mirror.SumOf[T]): Encoder[T] = 
+      new Encoder[T]:
+        private val casesEncoder = {
+          val encodersArray = Array.ofDim[Encoder[T]](extractSize[s.MirroredElemLabels])
+          deriveSumCasesEncoders[T, s.MirroredElemTypes](encodersArray, 0)
+        }
+
+        def encode(t: T): Json = 
+          casesEncoder.apply(s.ordinal(t)).encode(t)
+
+    private inline def extractSize[T <: Tuple] =
+      constValueTuple[T].size
+      
+    private inline def deriveSumCasesEncoders[T, CaseTypes <: Tuple](acc: Array[Encoder[T]], index: Int): Array[Encoder[T]] = 
+      inline erasedValue[CaseTypes] match
+        case _: EmptyTuple => acc
+        case _: (t *: ts) => 
+          acc(index) = deriveSumProductEncoder[t].asInstanceOf[Encoder[T]]
+          deriveSumCasesEncoders[T, ts](acc, index + 1)
+          
+
+    private inline def deriveSumProductEncoder[T]: Encoder[T] =
+      summonFrom { 
+        case p: Mirror.ProductOf[T] => deriveProductEncoder(p, true)
+      }
+
+  /*
+  * =========================================
+  * Deriving encoders - with Macros element.
+  * =========================================
+  */    
+  object MacroBased extends Approach:  
+    inline def deriveProductEncoder[T](p: Mirror.ProductOf[T]): Encoder[T] = 
+      derivedProductEncoder(p, false)
+    inline def deriveSumEncoder[T](s: Mirror.SumOf[T]): Encoder[T] = 
+      new Encoder[T]:
+        private val casesEncoder = {
+            val encodersArray = Array.ofDim[Encoder[T]](extractSize[s.MirroredElemLabels])
+            deriveSumProductsEncoders[s.MirroredElemTypes, T](encodersArray, 0)
+          }
+
+        def encode(t: T): Json = 
+          casesEncoder.apply(s.ordinal(t)).encode(t)
+
+    private inline def derivedProductEncoder[T](p: Mirror.ProductOf[T], inline withDiscriminator: Boolean): Encoder[T] =
+      new Encoder[T]:
+        def encode(t: T): Json =
+          val initialMap = 
+            inline if withDiscriminator then
+              val typeJsoned = summonInline[Encoder[String]].encode(constValue[p.MirroredLabel])
+              Map.empty[String, Json] + (("type", typeJsoned))
+            else Map.empty[String, Json]
+          go[p.MirroredElemLabels, p.MirroredElemTypes, T](initialMap, t)
+  
+    private inline def go[FieldsLabels <: Tuple, FieldsTypes <: Tuple, I](acc: Map[String, Json], instance: I): Json.JsonObject =
+      inline erasedValue[(FieldsLabels, FieldsTypes)] match
+        case _: (l *: ls, t *: ts) =>        
+          go[ls, ts, I](acc + makeJsonEntry[l, t, I](instance), instance)      
+        case _ => Json.JsonObject(acc)
+  
+    private inline def makeJsonEntry[FieldLabel, FieldType, I](instance: I): (String, Json) = 
+      ${ makeJsonEntryMacro[FieldLabel, FieldType, I]('instance) }
+  
+    private final def makeJsonEntryMacro[FieldLabel: Type, FieldType: Type, I](instance: Expr[I])(using Quotes): Expr[(String, Json)] = 
+      import quotes.reflect.*
+      val fieldName = Type.valueOfConstant[FieldLabel].getOrElse(report.throwError("Non-const value met!")).asInstanceOf[String]
+      val encoder = Expr.summon[Encoder[FieldType]].getOrElse(report.throwError(s"Missing encoder for: $fieldName"))
+      '{
+        val fieldNameV = ${Expr(fieldName)}
+        val selected = ${Select.unique(instance.asTerm, fieldName).asExprOf[FieldType]}
+        val json = $encoder.encode(selected)
+        (fieldNameV, json)
+      }
+  
+    private inline def extractSize[Labels <: Tuple]: Int = 
+      constValueTuple[Labels].size
+
+    private inline def deriveSumProductsEncoders[CasesTypes <: Tuple, T](acc: Array[Encoder[T]], index: Int): Array[Encoder[T]] =
+      inline erasedValue[CasesTypes] match
+        case _: EmptyTuple => acc
+        case _: (c *: cs) => 
+          acc(index) = deriveSumProductEncoder[c].asInstanceOf[Encoder[T]]
+          deriveSumProductsEncoders[cs, T](acc, index + 1)
+  
+    // Must be defined separately    
+    private inline def deriveSumProductEncoder[T] = 
+      summonFrom { 
+        case p : Mirror.ProductOf[T] => derivedProductEncoder(p, true)
+      }    
