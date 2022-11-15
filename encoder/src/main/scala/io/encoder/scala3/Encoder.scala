@@ -54,9 +54,9 @@ object Encoder:
   inline def derived[T](using m: Mirror.Of[T]): Encoder[T] = 
     inline m match
       case p: Mirror.ProductOf[T] => 
-        MacroBased.deriveProductEncoder[T](p)
+        ShallowMirror.deriveProductEncoder[T](p)
       case s: Mirror.SumOf[T] => 
-        MacroBased.deriveSumEncoder[T](s)
+        ShallowMirror.deriveSumEncoder[T](s)
 
 
   trait Approach: 
